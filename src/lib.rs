@@ -41,11 +41,19 @@ impl VirtualBoxExtension {
     fn run_vboxmanage(&self, args: &[&str]) -> Result<String, String> {
         println!("Running VBoxManage command: {:?}", args);
         
+        // Only add exe on windows
+        #[cfg(target_os = "windows")]
         let output = Command::new("VBoxManage.exe")
             .args(args)
             .output()
             .map_err(|e| format!("Failed to execute VBoxManage command: {}", e))?;
             
+        #[cfg(not(target_os = "windows"))]
+        let output = Command::new("VBoxManage")
+            .args(args)
+            .output()
+            .map_err(|e| format!("Failed to execute VBoxManage command: {}", e))?;
+
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             Ok(stdout)
