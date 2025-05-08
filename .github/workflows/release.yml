@@ -146,14 +146,39 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
       
-      # Build using cargo for native targets with --crate-type=cdylib
+      # Configure Cargo.toml for library build
+      - name: Configure Cargo.toml for library build
+        shell: bash
+        run: |
+          # Backup original Cargo.toml
+          cp Cargo.toml Cargo.toml.bak
+          
+          # Check if crate-type is already defined
+          if grep -q 'crate-type' Cargo.toml; then
+            echo "crate-type already defined in Cargo.toml"
+          else
+            # Add lib section with crate-type if it doesn't exist
+            if grep -q '^\[lib\]' Cargo.toml; then
+              # [lib] section exists, add crate-type to it
+              sed -i.tmp '/^\[lib\]/a crate-type = ["cdylib"]' Cargo.toml
+            else
+              # Add [lib] section with crate-type
+              echo -e "\n[lib]\ncrate-type = [\"cdylib\"]" >> Cargo.toml
+            fi
+          fi
+          
+          # Show the changes
+          echo "Modified Cargo.toml:"
+          cat Cargo.toml
+
+      # Build using cargo for native targets
       - name: Build library
         uses: actions-rs/cargo@v1
         env:
           RUST_BACKTRACE: 1
         with:
           command: build
-          args: --release --target ${{ matrix.target }} --crate-type=cdylib
+          args: --release --target ${{ matrix.target }}
 
       - name: Set library path variables
         shell: bash
@@ -455,18 +480,42 @@ jobs:
           
           cat Cross.toml
       
+      # Configure Cargo.toml for library build
+      - name: Configure Cargo.toml for library build
+        run: |
+          # Backup original Cargo.toml
+          cp Cargo.toml Cargo.toml.bak
+          
+          # Check if crate-type is already defined
+          if grep -q 'crate-type' Cargo.toml; then
+            echo "crate-type already defined in Cargo.toml"
+          else
+            # Add lib section with crate-type if it doesn't exist
+            if grep -q '^\[lib\]' Cargo.toml; then
+              # [lib] section exists, add crate-type to it
+              sed -i.tmp '/^\[lib\]/a crate-type = ["cdylib"]' Cargo.toml
+            else
+              # Add [lib] section with crate-type
+              echo -e "\n[lib]\ncrate-type = [\"cdylib\"]" >> Cargo.toml
+            fi
+          fi
+          
+          # Show the changes
+          echo "Modified Cargo.toml:"
+          cat Cargo.toml
+      
       # Special build for WebAssembly
       - name: Build WebAssembly
         if: matrix.target == 'wasm32-unknown-unknown'
         run: |
           rustup target add wasm32-unknown-unknown
-          cargo build --release --target wasm32-unknown-unknown --crate-type=cdylib
+          cargo build --release --target wasm32-unknown-unknown
       
       # Build using cross for non-WASM targets
       - name: Build with cross
         if: matrix.target != 'wasm32-unknown-unknown'
         run: |
-          cross build --release --target ${{ matrix.target }} --crate-type=cdylib
+          cross build --release --target ${{ matrix.target }}
       
       # Create ZIP with library and header
       - name: Create platform package
