@@ -73,24 +73,46 @@ impl VirtualBoxExtension {
         let output = self.run_vboxmanage(&["list", "vms"])?;
         
         // Parse the output to get VM names and UUIDs
-        let mut vms = Vec::new();
+        let mut workers = Vec::new();
+        
         for line in output.lines() {
-            let parts: Vec<&str> = line.split(' ').collect();
-            if parts.len() >= 2 {
-                let name = parts[0].trim_matches('"').to_string();
-                let uuid = parts[1].trim_matches('{').trim_matches('}').to_string();
-                
-                vms.push(json!({
-                    "name": name,
-                    "uuid": uuid
-                }));
+            if line.trim().is_empty() {
+                continue;
+            }
+            
+            // Each line is in format: "VM Name" {uuid}
+            if let (Some(first_quote), Some(last_quote)) = (line.find('"'), line.rfind('"')) {
+                if first_quote < last_quote {
+                    let name = line[first_quote+1..last_quote].to_string();
+                    
+                    // Find UUID between curly braces
+                    if let (Some(open_brace), Some(close_brace)) = (line.find('{'), line.rfind('}')) {
+                        if open_brace < close_brace {
+                            let uuid = line[open_brace+1..close_brace].to_string();
+                            
+                            workers.push(json!({
+                                "name": name,
+                                "uuid": uuid,
+                                "id": uuid,
+                                "state": "unknown"
+                            }));
+                            
+                            println!("Successfully parsed VM: name='{}', uuid='{}'", name, uuid);
+                        }
+                    }
+                }
             }
         }
         
-        Ok(json!({
-            "success": true,
-            "vms": vms
-        }))
+        // Return just the content for the result object - the CPI wrapper will
+        // handle adding the success/error fields
+        let result = json!({
+            "workers": workers
+        });
+        
+        println!("Final result JSON: {}", result.to_string());
+        
+        Ok(result)
     }
     
     fn create_worker(&self, worker_name: String, os_type: String, memory_mb: i64, cpu_count: i64) -> ActionResult {

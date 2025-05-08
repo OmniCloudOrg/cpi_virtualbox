@@ -1,0 +1,383 @@
+name: Publish lib_cpi
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'lib_cpi/**'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      
+      - name: Check if lib_cpi/Cargo.toml version changed
+        id: check
+        run: |
+          cd lib_cpi
+          CURRENT_VERSION=$(grep -m1 version Cargo.toml | cut -d '"' -f2)
+          cd ..
+          git checkout HEAD^1
+          cd lib_cpi
+          PREVIOUS_VERSION=$(grep -m1 version Cargo.toml | cut -d '"' -f2)
+          cd ..
+          git checkout -
+          
+          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "Version changed: $PREVIOUS_VERSION -> $CURRENT_VERSION"
+          else
+            echo "should_publish=false" >> $GITHUB_OUTPUT
+            echo "Version unchanged: $CURRENT_VERSION"
+          fi
+
+  publish-lib-cpi:
+    needs: check-version
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      # Verify the package builds successfully
+      - name: Build lib_cpi
+        run: |
+          cd lib_cpi
+          cargo build --release
+      
+      # Login to crates.io
+      - name: Login to crates.io
+        uses: actions-rs/cargo@v1
+        with:
+          command: login
+          args: ${{ secrets.CRATES_IO_TOKEN }}
+      
+      # Publish to crates.io
+      - name: Publish lib_cpi
+        uses: actions-rs/cargo@v1
+        with:
+          command: publish
+          args: -p lib_cpi
+      
+      # Create a GitHub release for this version
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: lib_cpi-v${{ needs.check-version.outputs.version }}
+          name: lib_cpi v${{ needs.check-version.outputs.version }}
+          draft: false
+          prerelease: false
+          body: |
+            Release of lib_cpi version ${{ needs.check-version.outputs.version }}
+            
+            ## Changes
+            
+            Please check the commit history for changes since the last release.
+
+  # Build binary artifacts for different platforms
+  build-platform-libs:
+    needs: [check-version, publish-lib-cpi]
+    if: needs.check-version.outputs.should_publish == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false  # Continue with other builds if one fails
+      matrix:
+        include:
+          # Standard platforms
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            lib_extension: .so
+            asset_name: libcpi_linux_x86_64.so
+          
+          # Windows builds
+          - os: windows-latest 
+            target: x86_64-pc-windows-msvc
+            lib_extension: .dll
+            asset_name: cpi_windows_x86_64.dll
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            lib_extension: .dll
+            asset_name: cpi_windows_i686.dll
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            lib_extension: .dll
+            asset_name: cpi_windows_arm64.dll
+          
+          # macOS builds
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            lib_extension: .dylib
+            asset_name: libcpi_macos_x86_64.dylib
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            lib_extension: .dylib
+            asset_name: libcpi_macos_arm64.dylib
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      
+      # Install dependencies for macOS
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install openssl@1.1
+          echo "OPENSSL_DIR=$(brew --prefix openssl@1.1)" >> $GITHUB_ENV
+      
+      # Install OpenSSL for Linux
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+      
+      # Build using cargo
+      - name: Build lib_cpi
+        uses: actions-rs/cargo@v1
+        env:
+          RUST_BACKTRACE: 1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }} -p lib_cpi
+
+      # Locate and prepare the built library
+      - name: Prepare library artifact
+        shell: bash
+        run: |
+          # Dynamically find the actual file name since it may vary by platform
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            LIB_PATH=$(find target/${{ matrix.target }}/release -name "*cpi*.dll" | head -n 1)
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            LIB_PATH=$(find target/${{ matrix.target }}/release -name "*libcpi*.dylib" | head -n 1)
+          else
+            LIB_PATH=$(find target/${{ matrix.target }}/release -name "*libcpi*.so" | head -n 1)
+          fi
+          
+          if [ -z "$LIB_PATH" ]; then
+            echo "❌ ERROR: Could not find library file"
+            find target/${{ matrix.target }}/release -type f | grep -i cpi
+            exit 1
+          fi
+          
+          echo "Found library at: $LIB_PATH"
+          
+          # Copy to a standardized name
+          cp "$LIB_PATH" "${{ matrix.asset_name }}"
+          
+          # Generate SHA256
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
+          fi
+          
+          echo "Library prepared as ${{ matrix.asset_name }}"
+          echo "SHA256 file contents:"
+          cat "${{ matrix.asset_name }}.sha256"
+      
+      # Upload library artifact to the release
+      - name: Upload Library
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ needs.publish-lib-cpi.outputs.upload_url }}
+          asset_path: ${{ matrix.asset_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream
+        continue-on-error: true
+
+      # Upload SHA256 file
+      - name: Upload SHA256
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ needs.publish-lib-cpi.outputs.upload_url }}
+          asset_path: ${{ matrix.asset_name }}.sha256
+          asset_name: ${{ matrix.asset_name }}.sha256
+          asset_content_type: text/plain
+        continue-on-error: true
+
+  # Cross-compile for additional platforms using cross
+  cross-builds-libs:
+    needs: [check-version, publish-lib-cpi]
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static Linux build
+          - target: x86_64-unknown-linux-musl
+            lib_extension: .so
+            asset_name: libcpi_linux_x86_64_static.so
+            openssl_arch: amd64
+            
+          # ARM64 Linux 
+          - target: aarch64-unknown-linux-gnu
+            lib_extension: .so
+            asset_name: libcpi_linux_arm64.so
+            openssl_arch: arm64
+          
+          # ARM64 static Linux 
+          - target: aarch64-unknown-linux-musl
+            lib_extension: .so
+            asset_name: libcpi_linux_arm64_static.so
+            openssl_arch: arm64
+          
+          # 32-bit Linux
+          - target: i686-unknown-linux-gnu
+            lib_extension: .so
+            asset_name: libcpi_linux_i686.so
+            openssl_arch: i386
+          
+          # 32-bit static Linux
+          - target: i686-unknown-linux-musl
+            lib_extension: .so
+            asset_name: libcpi_linux_i686_static.so
+            openssl_arch: i386
+          
+          # ARMv7 (32-bit ARM for Raspberry Pi)
+          - target: armv7-unknown-linux-gnueabihf
+            lib_extension: .so
+            asset_name: libcpi_linux_armv7.so
+            openssl_arch: armhf
+          
+          # ARMv7 static
+          - target: armv7-unknown-linux-musleabihf
+            lib_extension: .so
+            asset_name: libcpi_linux_armv7_static.so
+            openssl_arch: armhf
+          
+          # WebAssembly
+          - target: wasm32-unknown-unknown
+            lib_extension: .wasm
+            asset_name: libcpi.wasm
+            no_openssl: true
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      
+      - name: Install cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+      
+      # Create Cross.toml with pre-build commands for OpenSSL
+      - name: Configure cross for OpenSSL
+        if: ${{ !matrix.no_openssl }}
+        run: |
+          cat > Cross.toml << EOF
+          [target.${{ matrix.target }}]
+          pre-build = [
+              "dpkg --add-architecture ${{ matrix.openssl_arch }}",
+              "apt-get update",
+              "apt-get install -y libssl-dev:${{ matrix.openssl_arch }}"
+          ]
+          EOF
+          
+          cat Cross.toml
+      
+      # Special build for WebAssembly
+      - name: Build WebAssembly
+        if: matrix.target == 'wasm32-unknown-unknown'
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cd lib_cpi
+          cargo build --release --target wasm32-unknown-unknown
+      
+      # Build using cross for non-WASM targets
+      - name: Build with cross
+        if: matrix.target != 'wasm32-unknown-unknown'
+        run: |
+          cross build --release --target ${{ matrix.target }} -p lib_cpi
+      
+      # Locate and prepare the built library
+      - name: Prepare library artifact
+        run: |
+          # Dynamically find the actual file name
+          LIB_PATH=$(find target/${{ matrix.target }}/release -name "*cpi*${{ matrix.lib_extension }}" | head -n 1)
+          
+          if [ -z "$LIB_PATH" ]; then
+            echo "❌ ERROR: Could not find library file"
+            find target/${{ matrix.target }}/release -type f | sort
+            exit 1
+          fi
+          
+          echo "Found library at: $LIB_PATH"
+          
+          # Copy to a standardized name
+          cp "$LIB_PATH" "${{ matrix.asset_name }}"
+          
+          # Generate SHA256
+          sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
+          
+          echo "Library prepared as ${{ matrix.asset_name }}"
+          echo "SHA256 file contents:"
+          cat "${{ matrix.asset_name }}.sha256"
+      
+      # Upload library artifact to the release
+      - name: Upload Library
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ needs.publish-lib-cpi.outputs.upload_url }}
+          asset_path: ${{ matrix.asset_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream
+        continue-on-error: true
+
+      # Upload SHA256 file
+      - name: Upload SHA256
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ needs.publish-lib-cpi.outputs.upload_url }}
