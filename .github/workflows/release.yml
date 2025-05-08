@@ -1,11 +1,25 @@
 name: Publish lib_cpi
 
 on:
+  # Automatic trigger on push to main branch with changes to lib_cpi
   push:
     branches:
       - main
     paths:
       - 'lib_cpi/**'
+  
+  # Manual trigger option
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (leave empty to use current version)'
+        required: false
+        type: string
+      force_publish:
+        description: 'Force publish even if version has not changed'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   check-version:
@@ -20,26 +34,70 @@ jobs:
         with:
           fetch-depth: 2
       
+      - name: Set manual version if provided
+        id: manual-version
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: |
+          echo "should_publish=true" >> $GITHUB_OUTPUT
+          echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          echo "Using manually specified version: ${{ github.event.inputs.version }}"
+          
+          # Update the version in Cargo.toml if manually specified
+          cd lib_cpi
+          sed -i "s/^version = \".*\"/version = \"${{ github.event.inputs.version }}\"/" Cargo.toml
+          echo "Updated lib_cpi/Cargo.toml with version ${{ github.event.inputs.version }}"
+      
       - name: Check if lib_cpi/Cargo.toml version changed
         id: check
+        if: steps.manual-version.outcome == 'skipped'
         run: |
           cd lib_cpi
           CURRENT_VERSION=$(grep -m1 version Cargo.toml | cut -d '"' -f2)
-          cd ..
-          git checkout HEAD^1
-          cd lib_cpi
-          PREVIOUS_VERSION=$(grep -m1 version Cargo.toml | cut -d '"' -f2)
-          cd ..
-          git checkout -
           
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "should_publish=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-            echo "Version changed: $PREVIOUS_VERSION -> $CURRENT_VERSION"
-          else
-            echo "should_publish=false" >> $GITHUB_OUTPUT
-            echo "Version unchanged: $CURRENT_VERSION"
+          # For push events, compare with previous commit
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            cd ..
+            git checkout HEAD^1
+            cd lib_cpi
+            PREVIOUS_VERSION=$(grep -m1 version Cargo.toml | cut -d '"' -f2)
+            cd ..
+            git checkout -
+            
+            if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+              echo "should_publish=true" >> $GITHUB_OUTPUT
+              echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "Version changed: $PREVIOUS_VERSION -> $CURRENT_VERSION"
+            else
+              echo "should_publish=false" >> $GITHUB_OUTPUT
+              echo "Version unchanged: $CURRENT_VERSION"
+            fi
+          # For manual trigger without specified version
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Check if force publish is enabled
+            if [[ "${{ github.event.inputs.force_publish }}" == "true" ]]; then
+              echo "should_publish=true" >> $GITHUB_OUTPUT
+              echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "Force publishing current version: $CURRENT_VERSION"
+            else
+              echo "should_publish=true" >> $GITHUB_OUTPUT
+              echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+              echo "Publishing current version: $CURRENT_VERSION"
+            fi
           fi
+      
+      # Combine outputs from both steps
+      - name: Combine version checks
+        id: combine
+        run: |
+          if [[ "${{ steps.manual-version.outputs.should_publish }}" == "true" ]]; then
+            echo "should_publish=true" >> $GITHUB_OUTPUT
+            echo "version=${{ steps.manual-version.outputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "should_publish=${{ steps.check.outputs.should_publish }}" >> $GITHUB_OUTPUT
+            echo "version=${{ steps.check.outputs.version }}" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Final decision: Publish=${{ steps.check.outputs.should_publish || steps.manual-version.outputs.should_publish }}, Version=${{ steps.manual-version.outputs.version || steps.check.outputs.version }}"
 
   publish-lib-cpi:
     needs: check-version
@@ -47,6 +105,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - uses: actions/checkout@v3
       
@@ -61,6 +121,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libssl-dev
+
+      # Update version in Cargo.toml if manual version was provided
+      - name: Update version in Cargo.toml
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: |
+          cd lib_cpi
+          sed -i "s/^version = \".*\"/version = \"${{ needs.check-version.outputs.version }}\"/" Cargo.toml
+          echo "Updated lib_cpi/Cargo.toml with version ${{ needs.check-version.outputs.version }}"
+          cat Cargo.toml | grep version
 
       # Verify the package builds successfully
       - name: Build lib_cpi
@@ -143,6 +212,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
+      
+      # Update version in Cargo.toml if manual version was provided
+      - name: Update version in Cargo.toml
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: |
+          cd lib_cpi
+          sed -i.bak "s/^version = \".*\"/version = \"${{ needs.check-version.outputs.version }}\"/" Cargo.toml
+          echo "Updated lib_cpi/Cargo.toml with version ${{ needs.check-version.outputs.version }}"
+          cat Cargo.toml | grep version
       
       - name: Install Rust
         uses: actions-rs/toolchain@v1
@@ -297,6 +375,15 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
+      # Update version in Cargo.toml if manual version was provided
+      - name: Update version in Cargo.toml
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: |
+          cd lib_cpi
+          sed -i "s/^version = \".*\"/version = \"${{ needs.check-version.outputs.version }}\"/" Cargo.toml
+          echo "Updated lib_cpi/Cargo.toml with version ${{ needs.check-version.outputs.version }}"
+          cat Cargo.toml | grep version
+      
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -381,3 +468,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ needs.publish-lib-cpi.outputs.upload_url }}
+          asset_path: ${{ matrix.asset_name }}.sha256
+          asset_name: ${{ matrix.asset_name }}.sha256
+          asset_content_type: text/plain
+        continue-on-error: true
