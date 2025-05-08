@@ -100,7 +100,7 @@ impl VirtualBoxExtension {
                             
                             workers.push(json!({
                                 "name": name,
-                                "uuid": uuid,
+                                "uuid": uuid, // This field is not required by the CPI standard, but ID is. We return it in bolth places for convenience.
                                 "id": uuid,
                                 "state": "unknown"
                             }));
