@@ -1,10 +1,10 @@
 [package]
-name = "virtualbox_extension"
+name = "cpi_virtualbox"
 version = "0.1.3"
 edition = "2024"
 
 [lib]
-name = "virtualbox_extension"
+name = "cpi_virtualbox"
 crate-type = ["cdylib"]
 
 [dependencies]
